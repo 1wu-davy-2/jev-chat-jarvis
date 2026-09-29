@@ -1,0 +1,101 @@
+name: Release APK
+
+# 打 v* tag 触发打包（跟 PC 版 jev-chat-windows 同一个约定），也可以在 Actions 页手动跑。
+#
+# 签名走两条路，看仓库有没有配 secret：
+#   配了 JEV_KEYSTORE_B64 那四个 → assembleRelease，出的是跟 apk/ 里那个一样的正式签名包
+#   没配                        → assembleDebug，debug 签名，能直接装
+#                                 （但签名跟正式包不同，装之前要先卸载正式版，会清设置）
+# 正式签名材料不在仓库里（.gitignore 排除 *.jks / keystore.properties，
+# app/build.gradle.kts 从 JEV_KEYSTORE_PROPS 指的仓库外文件读），所以只能走 secret。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write      # 发 Release 需要写权限
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      KEYSTORE_B64: ${{ secrets.JEV_KEYSTORE_B64 }}
+      KEYSTORE_PASS: ${{ secrets.JEV_KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.JEV_KEY_ALIAS }}
+      KEY_PASS: ${{ secrets.JEV_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # app/build.gradle.kts 要求 JDK 17（sourceCompatibility / jvmTarget 都是 17）
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # 仓库里 gradlew 存的是 100644，Linux 上直接 ./gradlew 会 permission denied。
+      # （上游一直没有 CI，所以没人碰到过；这边每次跑都补一下。）
+      - name: 给 gradlew 加执行位
+        run: chmod +x gradlew
+
+      # 顺手把单测跑了：core/RelayUrlTest 就在这儿。构建挂了也要先看见是哪一步挂的。
+      - name: 单测
+        run: ./gradlew test --no-daemon --stacktrace
+
+      # tag（v1.4.1）→ versionName（1.4.1）。只改工作区，不提交。
+      - name: 用 tag 覆盖 versionName
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          echo "tag $GITHUB_REF_NAME → versionName $V"
+          sed -i "s/^\([[:space:]]*versionName = \)\"[^\"]*\"/\1\"$V\"/" app/build.gradle.kts
+          grep -n "versionName" app/build.gradle.kts
+
+      - name: 还原正式签名材料（没配 secret 就跳过）
+        id: sign
+        if: env.KEYSTORE_B64 != ''
+        run: |
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "$RUNNER_TEMP/release.jks" "$KEYSTORE_PASS" "$KEY_ALIAS" "$KEY_PASS" \
+            > "$RUNNER_TEMP/jev-release.properties"
+          echo "props=$RUNNER_TEMP/jev-release.properties" >> "$GITHUB_OUTPUT"
+          echo "正式签名材料已就位"
+
+      - name: 打包
+        env:
+          JEV_KEYSTORE_PROPS: ${{ steps.sign.outputs.props }}
+        run: |
+          if [ -n "$JEV_KEYSTORE_PROPS" ]; then
+            ./gradlew assembleRelease --no-daemon --stacktrace
+            echo "APK_PATH=app/build/outputs/apk/release/app-release.apk" >> "$GITHUB_ENV"
+            echo "SIGN_NOTE=正式签名（release）" >> "$GITHUB_ENV"
+          else
+            ./gradlew assembleDebug --no-daemon --stacktrace
+            echo "APK_PATH=app/build/outputs/apk/debug/app-debug.apk" >> "$GITHUB_ENV"
+            echo "SIGN_NOTE=debug 签名（仓库没配正式签名 secret）——装之前要先卸载正式版，签名不同" >> "$GITHUB_ENV"
+          fi
+
+      - name: 收集产物
+        run: |
+          mkdir -p out
+          cp "$APK_PATH" "out/jev-assistant-${GITHUB_REF_NAME:-manual}.apk"
+          ls -la out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: out/*.apk
+
+      - name: 挂到 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*.apk
+          body: |
+            ${{ env.SIGN_NOTE }}
+
+            构建自 `${{ github.sha }}`（tag `${{ github.ref_name }}`）。
+            聊天文字只在本机处理，这个包不含任何密钥。
