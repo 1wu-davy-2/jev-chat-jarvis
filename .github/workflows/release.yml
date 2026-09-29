@@ -14,10 +14,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # app/build.gradle.kts 要求 JDK 17（sourceCompatibility / jvmTarget 都是 17）
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -44,7 +44,25 @@ jobs:
       # build.gradle.kts 从 JEV_KEYSTORE_PROPS 指的仓库外文件读），跑 CI 拿不到，
       # 所以这里不碰 assembleRelease —— 没有签名材料时它出的是装不上的包。
       - name: 打包（debug）
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        run: |
+          set -o pipefail
+          ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log
+
+      # GitHub 的 job 日志接口要鉴权，公开仓库也拉不到（匿名 403）。
+      # 构建失败时把日志尾部推到 ci-log 分支，失败原因就公开可读了：
+      #   https://raw.githubusercontent.com/<owner>/<repo>/ci-log/.ci/build.log
+      # 构建正常时这一步不跑，分支也不会动。
+      - name: 失败时把日志推到 ci-log 分支
+        if: failure()
+        run: |
+          git config user.name  "ci-log"
+          git config user.email "ci-log@localhost"
+          mkdir -p .ci
+          tail -c 80000 build.log > .ci/build.log
+          git checkout -B ci-log
+          git add -f .ci/build.log
+          git commit -m "CI 构建失败日志"
+          git push -f origin ci-log
 
       - name: 收集产物
         run: |
