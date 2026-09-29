@@ -1,3 +1,4 @@
+import java.io.File
 import java.io.FileInputStream
 import java.util.Properties
 
@@ -9,8 +10,14 @@ plugins {
 // Release signing: reads a properties file kept OUTSIDE the repo
 // (storeFile / storePassword / keyAlias / keyPassword). Override the path with
 // the JEV_KEYSTORE_PROPS env var. Without it, release builds are unsigned.
+//
+// 这里用 java.io.File 而不是 Gradle 的 file()：file() 会把带冒号的字符串当 URL 解析，
+// 默认路径 "H:/..." 的 H: 被当成 URL scheme，在 Linux / macOS 上直接报
+// "Cannot convert URL 'H:/...' to a file"，configure 阶段就挂，连编译都开始不了
+// （CI 上就是这么挂的，README 里说的「只能 Windows 构建」其实是这个 bug）。
+// File() 只把它当路径看：Windows 上仍走 H: 那份签名配置，别处只是文件不存在 → 跳过。
 val releaseProps = Properties().apply {
-    val f = file(System.getenv("JEV_KEYSTORE_PROPS") ?: "H:/android/keys/jev-release.properties")
+    val f = File(System.getenv("JEV_KEYSTORE_PROPS") ?: "H:/android/keys/jev-release.properties")
     if (f.exists()) FileInputStream(f).use { load(it) }
 }
 
